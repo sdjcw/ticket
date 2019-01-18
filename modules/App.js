@@ -19,6 +19,7 @@ export default class App extends Component {
       isCustomerService: false,
       organizations: [],
       selectedOrgId: '',
+      tagMetadatas: [],
     }
   }
 
@@ -57,7 +58,12 @@ export default class App extends Component {
 
   refreshGlobalInfo(currentUser) {
     if (!currentUser) {
-      this.setState({currentUser: null, isCustomerService: false, organizations: []})
+      this.setState({
+        currentUser: null,
+        isCustomerService: false,
+        organizations: [],
+        tagMetadatas: []
+      })
       Raven.setUserContext()
       return
     }
@@ -67,9 +73,15 @@ export default class App extends Component {
       new AV.Query('Organization')
         .include('memberRole')
         .find(),
+      new AV.Query('TagMetadata').find(),
     ])
-    .then(([isCustomerService, organizations]) => {
-      this.setState({currentUser, isCustomerService, organizations})
+    .then(([isCustomerService, organizations, tagMetadatas]) => {
+      this.setState({
+        currentUser,
+        isCustomerService,
+        organizations,
+        tagMetadatas
+      })
       Raven.setUserContext({
         username: currentUser.get('username'),
         id: currentUser.id,
@@ -141,6 +153,7 @@ export default class App extends Component {
             handleOrgChange: this.handleOrgChange.bind(this),
             leaveOrganization: this.leaveOrganization.bind(this),
             selectedOrgId: this.state.selectedOrgId,
+            tagMetadatas: this.state.tagMetadatas,
           })}
         </div>
         <ServerNotification currentUser={this.state.currentUser}
@@ -184,7 +197,7 @@ class ServerNotification extends Component {
   }
 
   componentDidMount() {
-    this.updateLiveQuery(this.props.isCustomerService)
+    //this.updateLiveQuery(this.props.isCustomerService)
   }
 
   shouldComponentUpdate(nextProps, _nextState) {
@@ -192,7 +205,7 @@ class ServerNotification extends Component {
   }
 
   componentWillReceiveProps(nextProps) {
-    this.updateLiveQuery(nextProps.isCustomerService)
+    //this.updateLiveQuery(nextProps.isCustomerService)
   }
 
   updateLiveQuery(isCustomerService) {

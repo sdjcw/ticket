@@ -6,8 +6,7 @@ import PropTypes from 'prop-types'
 import {FormGroup, ControlLabel, FormControl, Label, Alert, Button, ButtonToolbar, Radio, Tooltip, OverlayTrigger} from 'react-bootstrap'
 import AV from 'leancloud-storage/live-query'
 
-import {UserLabel, TicketStatusLabel, uploadFiles, getCategoryPathName, getCategoriesTree, getTinyCategoryInfo} from './common'
-import UpdateTicket from './UpdateTicket'
+import {getCustomerServices, UserLabel, TicketStatusLabel, uploadFiles, getCategoryPathName, getCategoriesTree, getTinyCategoryInfo, CategoriesSelect, depthFirstSearchFind, getTicketAcl} from './common'
 import TextareaWithPreview from './components/TextareaWithPreview'
 import css from './Ticket.css'
 import csCss from './CustomerServiceTickets.css'
@@ -36,6 +35,8 @@ export default class Ticket extends Component {
       categoriesTree: [],
       ticket: null,
       replies: [],
+      tagMetadatas: [],
+      tags: [],
       opsLogs: [],
     }
   }
@@ -53,14 +54,16 @@ export default class Ticket extends Component {
       return Promise.all([
         getCategoriesTree(false),
         this.getReplyQuery(ticket).find(),
+        new AV.Query('TagMetadata').find(),
         new AV.Query('Tag').equalTo('ticket', ticket).find(),
         this.getOpsLogQuery(ticket).find(),
       ])
-      .then(([categoriesTree, replies, tags, opsLogs]) => {
+      .then(([categoriesTree, replies, tagMetadatas, tags, opsLogs]) => {
         this.setState({
           categoriesTree,
           ticket,
           replies,
+          tagMetadatas,
           tags,
           opsLogs,
         })
@@ -85,6 +88,7 @@ export default class Ticket extends Component {
     const query = new AV.Query('Ticket')
     .equalTo('nid', nid)
     .include('author')
+    .include('organization')
     .include('assignee')
     .include('files')
     .limit(1)
@@ -92,7 +96,7 @@ export default class Ticket extends Component {
       this.ticketLiveQuery = liveQuery
       return this.ticketLiveQuery.on('update', ticket => {
         if (ticket.updatedAt.getTime() != this.state.ticket.updatedAt.getTime()) {
-          ticket.fetch({include: 'author,assignee,files'})
+          ticket.fetch({include: 'author,organization,assignee,files'})
           .then(() => {
             this.setState({ticket})
             return
@@ -111,19 +115,19 @@ export default class Ticket extends Component {
     .include('author')
     .include('files')
     .limit(500)
-    replyQuery.subscribe().then(liveQuery => {
-      this.replyLiveQuery = liveQuery
-      return this.replyLiveQuery.on('create', reply => {
-        return reply.fetch({include: 'author,files'})
-        .then(() => {
-          const replies = this.state.replies
-          replies.push(reply)
-          this.setState({replies})
-          return
-        }).catch(this.context.addNotification)
-      })
-    })
-    .catch(this.context.addNotification)
+    //replyQuery.subscribe().then(liveQuery => {
+    //  this.replyLiveQuery = liveQuery
+    //  return this.replyLiveQuery.on('create', reply => {
+    //    return reply.fetch({include: 'author,files'})
+    //    .then(() => {
+    //      const replies = this.state.replies
+    //      replies.push(reply)
+    //      this.setState({replies})
+    //      return
+    //    }).catch(this.context.addNotification)
+    //  })
+    //})
+    //.catch(this.context.addNotification)
     return replyQuery
   }
 
@@ -131,20 +135,20 @@ export default class Ticket extends Component {
     const opsLogQuery = new AV.Query('OpsLog')
     .equalTo('ticket', ticket)
     .ascending('createdAt')
-    opsLogQuery.subscribe()
-    .then(liveQuery => {
-      this.opsLogLiveQuery = liveQuery
-      return this.opsLogLiveQuery.on('create', opsLog => {
-        return opsLog.fetch()
-        .then(() => {
-          const opsLogs = this.state.opsLogs
-          opsLogs.push(opsLog)
-          this.setState({opsLogs})
-          return
-        }).catch(this.context.addNotification)
-      })
-    })
-    .catch(this.context.addNotification)
+    //opsLogQuery.subscribe()
+    //.then(liveQuery => {
+    //  this.opsLogLiveQuery = liveQuery
+    //  return this.opsLogLiveQuery.on('create', opsLog => {
+    //    return opsLog.fetch()
+    //    .then(() => {
+    //      const opsLogs = this.state.opsLogs
+    //      opsLogs.push(opsLog)
+    //      this.setState({opsLogs})
+    //      return
+    //    }).catch(this.context.addNotification)
+    //  })
+    //})
+    //.catch(this.context.addNotification)
     return opsLogQuery
   }
 
@@ -170,9 +174,13 @@ export default class Ticket extends Component {
   }
 
   operateTicket(action) {
-    return AV.Cloud.run('operateTicket', {ticketId: this.state.ticket.id, action})
-    .then((ticket) => {
-      this.setState({ticket: AV.parseJSON(ticket)})
+    const ticket = this.state.ticket
+    return AV.Cloud.run('operateTicket', {ticketId: ticket.id, action})
+    .then(() => {
+      return ticket.fetch({include: 'author,organization,assignee,files'})
+    })
+    .then(() => {
+      this.setState({ticket})
       return
     })
     .catch(this.context.addNotification)
@@ -192,6 +200,48 @@ export default class Ticket extends Component {
       this.setState({ticket})
       return
     })
+  }
+
+  saveTag(tagMetadata, value) {
+    const key = tagMetadata.get('key')
+    const tags = this.state.tags
+    const tag = _.find(tags, tag => tag.get('key') == key)
+    if (!tag) {
+      if (value == '') {
+        return
+      }
+
+      return new AV.Object('Tag', {
+        key,
+        value,
+        ticket: this.state.ticket,
+        author: AV.User.current(),
+        ACL: getTicketAcl(this.state.ticket.get('author'), this.state.ticket.get('organization')),
+      })
+      .save()
+      .then(tag => {
+        tags.push(tag)
+        this.setState(tags)
+        return
+      })
+      .then(this.context.addNotification)
+    } else {
+      if (value == '') {
+        return tag.destroy()
+        .then(() => {
+          this.setState({tags: _.reject(tags, tag => tag.get('key') == key)})
+          return
+        })
+        .then(this.context.addNotification)
+      }
+
+      return tag.save({value})
+      .then(() => {
+        this.setState(tags)
+        return
+      })
+      .then(this.context.addNotification)
+    }
   }
 
   saveEvaluation(evaluation) {
@@ -365,10 +415,6 @@ export default class Ticket extends Component {
     // 如果是客服自己提交工单，则当前客服在该工单中认为是用户，
     // 这时为了方便工单作为内部工作协调使用。
     const isCustomerService = this.props.isCustomerService && ticket.get('author').id != this.props.currentUser.id
-    const tags = this.state.tags.map((tag) => {
-      return <Tag key={tag.id} tag={tag} ticket={ticket} isCustomerService={isCustomerService} />
-    })
-
     const timeline = _.chain(this.state.replies)
       .concat(this.state.opsLogs)
       .sortBy((data) => {
@@ -391,7 +437,7 @@ export default class Ticket extends Component {
     } else if (ticketStatus === TICKET_STATUS.PRE_FULFILLED && !isCustomerService) {
       optionButtons = (
         <Alert bsStyle="warning">
-          <ControlLabel>我们的工程师认为该工单已解决，请确认：</ControlLabel>
+          <ControlLabel>我们认为该工单已解决，请确认：</ControlLabel>
           <Button bsStyle="primary" onClick={() => this.operateTicket('resolve')}>确认已解决</Button>
           {' '}
           <Button onClick={() => this.operateTicket('reopen')}>未解决</Button>
@@ -463,31 +509,24 @@ export default class Ticket extends Component {
           </div>
 
           <div className={'col-sm-4 ' + css.sidebar}>
-            <div>{tags}</div>
-
-            {ticket.get('assignee') &&
-              <FormGroup>
-                <label className="label-block">负责人</label>
-                <span className={css.assignee}><UserLabel user={ticket.get('assignee')} /></span>
-              </FormGroup>
-            }
-
-            <FormGroup>
-              <label className="label-block">类别</label>
-              <span className={csCss.category + ' ' + css.categoryBlock}>{getCategoryPathName(ticket.get('category'), this.state.categoriesTree)}</span>
-            </FormGroup>
-
-            {isTicketOpen(ticket) &&
-              <div>
-                <hr />
-                <UpdateTicket ticket={ticket}
-                  isCustomerService={isCustomerService}
-                  updateTicketCategory={this.updateTicketCategory.bind(this)}
-                  updateTicketAssignee={this.updateTicketAssignee.bind(this)}
+            {isCustomerService
+              && 
+                <TicketMetadataCS ticket={ticket}
                   categoriesTree={this.state.categoriesTree}
+                  tagMetadatas={this.state.tagMetadatas}
+                  tags={this.state.tags}
+                  updateTicketAssignee={this.updateTicketAssignee.bind(this)}
+                  updateTicketCategory={this.updateTicketCategory}
+                  saveTag={this.saveTag.bind(this)}
                 />
-              </div>
+              ||
+                <TicketMetadata ticket={ticket}
+                  categoriesTree={this.state.categoriesTree}
+                  tagMetadatas={this.state.tagMetadatas}
+                  tags={this.state.tags}
+                />
             }
+
             {optionButtons}
           </div>
         </div>
@@ -659,6 +698,133 @@ TicketReply.propTypes = {
 
 TicketReply.contextTypes = {
   addNotification: PropTypes.func.isRequired,
+}
+
+class TicketMetadata extends Component {
+
+  render() {
+    const ticket = this.props.ticket
+    return <div>
+      {ticket.get('assignee') &&
+        <FormGroup>
+          <label className="label-block">负责人</label>
+          <span className={css.assignee}><UserLabel user={ticket.get('assignee')} /></span>
+        </FormGroup>
+      }
+
+      <FormGroup>
+        <label className="label-block">类别</label>
+        <span className={csCss.category + ' ' + css.categoryBlock}>{getCategoryPathName(ticket.get('category'), this.props.categoriesTree)}</span>
+      </FormGroup>
+
+      {this.props.tags.map(tag => {
+        const tagMetadata = _.find(this.props.tagMetadatas, metadata => metadata.get('key') == tag.get('key'))
+        if (!tagMetadata) {
+          return <FormGroup key={tag.get('key')}>
+            <label className="label-block"><strong>{tag.get('key')}</strong></label>
+            <span>{tag.get('value')}</span>
+          </FormGroup>
+        }
+      })}
+    </div>
+  }
+
+}
+
+TicketMetadata.propTypes = {
+  ticket: PropTypes.instanceOf(AV.Object),
+  categoriesTree: PropTypes.array.isRequired,
+  tagMetadatas: PropTypes.array,
+  tags: PropTypes.array,
+}
+
+class TicketMetadataCS extends Component {
+
+  constructor(props) {
+    super(props)
+    this.state = {
+      assignees: [],
+    }
+  }
+
+  componentDidMount() {
+    this.fetchDatas()
+  }
+
+  fetchDatas() {
+    getCustomerServices()
+    .then(assignees => {
+      this.setState({assignees})
+      return
+    })
+    .catch(this.context.addNotification)
+  }
+
+  handleAssigneeChange(e) {
+    const customerService = _.find(this.state.assignees, {id: e.target.value})
+    this.props.updateTicketAssignee(customerService)
+    .then(this.context.addNotification)
+    .catch(this.context.addNotification)
+  }
+
+  handleCategoryChange(e) {
+    this.props.updateTicketCategory(depthFirstSearchFind(this.props.categoriesTree, c => c.id == e.target.value))
+    .then(this.context.addNotification)
+    .catch(this.context.addNotification)
+  }
+
+  handleTagChange(tagMetadata, value) {
+    this.props.saveTag(tagMetadata, value)
+  }
+
+  render() {
+    return <div>
+      <FormGroup>
+        <ControlLabel>负责人</ControlLabel>
+        <FormControl componentClass='select' value={this.props.ticket.get('assignee').id} onChange={this.handleAssigneeChange.bind(this)}>
+          {this.state.assignees.map((cs) => <option key={cs.id} value={cs.id}>{cs.get('username')}</option>)}
+        </FormControl>
+      </FormGroup>
+      <FormGroup>
+        <ControlLabel>类别</ControlLabel>
+        <CategoriesSelect categoriesTree={this.props.categoriesTree}
+          selected={this.props.ticket.get('category')}
+          onChange={this.handleCategoryChange.bind(this)} />
+      </FormGroup>
+      {this.props.tags.map(tag => {
+        const tagMetadata = _.find(this.props.tagMetadatas, metadata => metadata.get('key') == tag.get('key'))
+        if (!tagMetadata) {
+          return <FormGroup key={tag.get('key')}>
+            <ControlLabel>{tag.get('key')}</ControlLabel>
+            <FormControl type='text' value={tag.get('value')} disabled />
+          </FormGroup>
+        }
+      })}
+      {this.props.tagMetadatas.map(tagMetadata => {
+        const finded = _.find(this.props.tags, tag => tag.get('key') == tagMetadata.get('key'))
+        return <FormGroup key={tagMetadata.id}>
+          <ControlLabel>
+            {tagMetadata.get('key')}
+            {' '}
+            {!tagMetadata.get('userRead') && <span className='label label-default'>Private</span>}</ControlLabel>
+          <FormControl componentClass="select" onChange={(e) => this.handleTagChange(tagMetadata, e.target.value)} value={finded ? finded.get('value') : ''}>
+            <option></option>
+            {tagMetadata.get('values').map(v => <option key={v}>{v}</option>)}
+          </FormControl>
+        </FormGroup>
+      })}
+    </div>
+  }
+}
+
+TicketMetadataCS.propTypes = {
+  ticket: PropTypes.instanceOf(AV.Object),
+  categoriesTree: PropTypes.array.isRequired,
+  tagMetadatas: PropTypes.array,
+  tags: PropTypes.array,
+  updateTicketAssignee: PropTypes.func.isRequired,
+  updateTicketCategory: PropTypes.func.isRequired,
+  saveTag: PropTypes.func.isRequired,
 }
 
 class Tag extends Component{
